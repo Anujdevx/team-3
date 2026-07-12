@@ -1,0 +1,43 @@
+[project]
+name = "exams-service"
+version = "0.1.0"
+description = "Add your description here"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi[standard]>=0.115.0",
+    "httpx>=0.27.0",
+    "uvicorn[standard]>=0.32.0",
+    "xebia-core",
+]
+
+[dependency-groups]
+dev = [
+    "pyright>=1.1.411",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "pytest-cov>=7.1.0",
+    "ruff>=0.15.20",
+    "aiosqlite>=0.20.0",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM"]
+extend-ignore = ["E501", "E402", "ANN", "F401"]
+
+[tool.ruff.lint.flake8-bugbear]
+extend-immutable-calls = ["fastapi.Depends", "fastapi.params.Depends"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["ANN"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.uv.sources]
+xebia-core = { git = "https://gitlab.com/xebia-exam-platform/group-a/shared.git", subdirectory = "packages/core", branch = "main" }

@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.venv/
+.env
+.pytest_cache/
+.ruff_cache/
+.pyright/
+.vscode/
+.idea/
+*.swp
+*.swo

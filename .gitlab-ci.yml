@@ -1,0 +1,206 @@
+# ============================================================
+# CI Pipeline — Exams Service (Team 3)
+#
+# Stages (Phase 1):
+#   quality   → lint + type-check (every push)
+#   security  → SAST + secret detection + Trivy filesystem scan (every push)
+#   test      → pytest with 80% coverage enforcement (every push)
+#   build     → docker-build + trivy-image (main only)
+#
+# Image promotion pattern (build stage):
+#   docker-build  → pushes :$CI_COMMIT_SHA (candidate, unverified)
+#   trivy-image   → scans :$CI_COMMIT_SHA, then promotes to :stable
+#
+#   :$CI_COMMIT_SHA  unverified candidate — in registry for traceability,
+#                    but nothing deploys from this tag automatically.
+#   :stable          security-verified — the ONLY tag ArgoCD watches.
+#                    Updated only after a clean Trivy scan passes.
+# ============================================================
+
+stages:
+  - quality
+  - security
+  - test
+  - build
+
+# ── GitLab Security template includes ────────────────────────
+include:
+  - template: Security/SAST.gitlab-ci.yml
+  - template: Security/Secret-Detection.gitlab-ci.yml
+
+# ── Reusable base for all Python CI jobs ─────────────────────
+# xebia-core is a git dependency. pyproject.toml and uv.lock both use
+# HTTPS (not SSH) so CI does not need any SSH keys.
+# Credentials are injected via git's credential-store helper:
+#   CI_JOB_TOKEN has read access to the shared repo (allowlist configured
+#   in shared → Settings → CI/CD → Job token allowlist → team-3).
+.python-base:
+  image: python:3.12-slim
+  before_script:
+    - apt-get update && apt-get install -y git libatomic1 --no-install-recommends && rm -rf /var/lib/apt/lists/*
+    - pip install uv --quiet
+    - git config --global credential.helper store
+    - echo "https://gitlab-ci-token:${CI_JOB_TOKEN}@gitlab.com" > ~/.git-credentials
+    - chmod 600 ~/.git-credentials
+    - uv sync --frozen
+  cache:
+    key:
+      files:
+        - uv.lock
+    paths:
+      - .venv/
+
+# ============================================================
+# STAGE 1 — QUALITY
+# ============================================================
+
+lint:
+  extends: .python-base
+  stage: quality
+  script:
+    - uv run ruff check .
+    - uv run ruff format --check .
+
+type-check:
+  extends: .python-base
+  stage: quality
+  script:
+    - uv run pyright
+
+# ============================================================
+# STAGE 2 — SECURITY
+# ============================================================
+
+sast:
+  stage: security
+
+secret_detection:
+  stage: security
+
+trivy-fs:
+  stage: security
+  image:
+    name: aquasec/trivy:latest
+    entrypoint: [""]
+  script:
+    - trivy fs --scanners vuln --severity CRITICAL,HIGH --format table --exit-code 0 .
+    - |
+      trivy fs \
+        --scanners vuln \
+        --severity CRITICAL \
+        --ignore-unfixed \
+        --exit-code 1 \
+        --format sarif \
+        --output trivy-fs.sarif \
+        .
+  artifacts:
+    when: always
+    paths:
+      - trivy-fs.sarif
+    reports:
+      sast: trivy-fs.sarif
+
+# ============================================================
+# STAGE 3 — TEST
+# Enforces 80% coverage threshold — pipeline fails below this
+# ============================================================
+
+pytest:
+  extends: .python-base
+  stage: test
+  script:
+    - |
+      uv run pytest \
+        --cov=src \
+        --cov-fail-under=80 \
+        --cov-report=xml:coverage.xml \
+        --cov-report=term-missing \
+        --junitxml=report.xml \
+        -v
+  coverage: '/TOTAL.*\s+(\d+%)$/'
+  artifacts:
+    when: always
+    reports:
+      junit: report.xml
+      coverage_report:
+        coverage_format: cobertura
+        path: coverage.xml
+
+# ============================================================
+# STAGE 4 — BUILD (main only)
+# ============================================================
+
+docker-build:
+  stage: build
+  image: docker:27
+  services:
+    - name: docker:27-dind
+      alias: docker
+  variables:
+    DOCKER_TLS_CERTDIR: "/certs"
+    DOCKER_DRIVER: overlay2
+  before_script:
+    - apk add --no-cache git
+    # Clone shared repo via CI_JOB_TOKEN (HTTPS, no SSH keys needed).
+    # Requires: shared → Settings → CI/CD → Job token allowlist → team-3.
+    - |
+      git clone \
+        "https://gitlab-ci-token:${CI_JOB_TOKEN}@gitlab.com/xebia-exam-platform/group-a/shared.git" \
+        /tmp/shared_repo
+    # Reconstruct the monorepo layout the Dockerfile COPY commands expect:
+    #   /tmp/build_context/
+    #     shared/packages/core/   ← from shared repo
+    #     team-3/                 ← this repo's content
+    - mkdir -p /tmp/build_context/team-3 /tmp/build_context/shared
+    - cp -rp . /tmp/build_context/team-3/
+    - cp -rp /tmp/shared_repo/packages /tmp/build_context/shared/packages
+    - docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
+  script:
+    - |
+      docker build \
+        --file /tmp/build_context/team-3/Dockerfile \
+        --build-arg CI_JOB_TOKEN="$CI_JOB_TOKEN" \
+        --tag "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHA" \
+        /tmp/build_context/
+    - docker push "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHA"
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+
+trivy-image:
+  stage: build
+  image: docker:27
+  services:
+    - name: docker:27-dind
+      alias: docker
+  variables:
+    DOCKER_TLS_CERTDIR: "/certs"
+  needs:
+    - docker-build
+  before_script:
+    - apk add --no-cache curl bash
+    - curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
+    - docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
+    - docker pull "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHA"
+  script:
+    - trivy image --scanners vuln --severity CRITICAL,HIGH --format table --exit-code 0 "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHA"
+    - trivy image --format cyclonedx --output sbom.cdx.json "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHA"
+    - |
+      trivy image \
+        --scanners vuln \
+        --severity CRITICAL \
+        --ignore-unfixed \
+        --exit-code 1 \
+        --format sarif \
+        --output trivy-image.sarif \
+        "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHA"
+    - docker tag "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHA" "$CI_REGISTRY_IMAGE:stable"
+    - docker push "$CI_REGISTRY_IMAGE:stable"
+  artifacts:
+    when: always
+    paths:
+      - trivy-image.sarif
+      - sbom.cdx.json
+    reports:
+      container_scanning: trivy-image.sarif
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"

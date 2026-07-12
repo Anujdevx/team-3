@@ -1,0 +1,19 @@
+{
+  "pythonVersion": "3.12",
+  "typeCheckingMode": "strict",
+  "venvPath": ".",
+  "venv": ".venv",
+  "reportDeprecated": "none",
+  "reportUnknownVariableType": "none",
+  "reportUnknownMemberType": "none",
+  "reportUnknownArgumentType": "none",
+  "reportAttributeAccessIssue": "none",
+  "reportUnknownParameterType": "none",
+  "reportMissingParameterType": "none",
+  "reportCallIssue": "none",
+  "reportArgumentType": "none",
+  "reportGeneralTypeIssues": "none",
+  "reportReturnType": "none",
+  "reportAssignmentType": "none",
+  "reportMissingTypeArgument": "none"
+}
